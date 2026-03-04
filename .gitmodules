@@ -1,0 +1,3 @@
+[submodule ".gemini"]
+	path = .gemini
+	url = https://github.com/akkyey/gemini-core.git
