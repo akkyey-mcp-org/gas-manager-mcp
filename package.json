@@ -1,0 +1,23 @@
+{
+  "name": "gas-manager-mcp",
+  "version": "1.0.0",
+  "description": "Universal Google Apps Script (GAS) Management MCP Server.",
+  "type": "module",
+  "main": "out/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node out/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1"
+  },
+  "devDependencies": {
+    "@google/clasp": "^3.2.0",
+    "@types/node": "^25.3.3",
+    "typescript": "^5.9.3"
+  }
+}

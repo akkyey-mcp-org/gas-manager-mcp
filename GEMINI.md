@@ -1,0 +1,1 @@
+.gemini/templates/GEMINI.md.node
