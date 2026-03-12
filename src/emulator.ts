@@ -204,13 +204,23 @@ export class Spreadsheet {
 
 export const SpreadsheetAppEmulator = {
     activeSpreadsheet: new Spreadsheet("MockSpreadsheet"),
+    // IDベースのキャッシュ: 同一IDに対して同一インスタンスを返す
+    _openedById: {} as { [id: string]: Spreadsheet },
     getActiveSpreadsheet() {
         return this.activeSpreadsheet;
     },
     openById(id: string) {
-        return new Spreadsheet(`Spreadsheet_${id}`);
+        if (!this._openedById[id]) {
+            this._openedById[id] = new Spreadsheet(`Spreadsheet_${id}`);
+        }
+        return this._openedById[id];
     },
-    flush() { }
+    flush() { },
+    // テスト用: キャッシュをリセット
+    _reset() {
+        this._openedById = {};
+        this.activeSpreadsheet = new Spreadsheet("MockSpreadsheet");
+    }
 };
 
 export const UtilitiesEmulator = {
@@ -320,3 +330,378 @@ export const DriveAdvancedServiceEmulator = {
         remove: (id: string) => { }
     }
 };
+
+/**
+ * ScriptApp モック
+ * トリガー管理やスクリプトIDの取得をエミュレート
+ */
+export const ScriptAppEmulator = {
+    getProjectTriggers() {
+        return [];
+    },
+    getScriptId() {
+        return "mock_script_id_emulated";
+    },
+    newTrigger(funcName: string) {
+        return {
+            timeBased: () => ({
+                everyMinutes: (m: number) => ({ create: () => ({}) }),
+                everyHours: (h: number) => ({ create: () => ({}) }),
+                atHour: (h: number) => ({ nearMinute: (m: number) => ({ everyDays: (d: number) => ({ create: () => ({}) }) }) }),
+            })
+        };
+    },
+    deleteTrigger(trigger: any) { }
+};
+
+/**
+ * GAS コードの静的解析: 重複関数の検出
+ * @param code - 結合済みの GAS ソースコード
+ * @param fileMap - ファイル名→行数のマップ（複数ファイル結合時の位置特定用）
+ * @returns 検出された重複情報の配列
+ */
+export function detectDuplicateFunctions(
+    code: string,
+    fileMap?: { name: string; startLine: number; endLine: number }[]
+): { name: string; locations: { line: number; file?: string }[] }[] {
+    const seen: { [name: string]: { line: number; file?: string }[] } = {};
+    const lines = code.split("\n");
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        const match = line.match(/^\s*function\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/);
+        if (match && match[1]) {
+            const funcName = match[1];
+            if (!seen[funcName]) seen[funcName] = [];
+
+            // ファイルマップがある場合、どのファイルに属するか特定
+            let fileName: string | undefined = undefined;
+            if (fileMap) {
+                for (const fm of fileMap) {
+                    if (i + 1 >= fm.startLine && i + 1 <= fm.endLine) {
+                        fileName = fm.name;
+                        break;
+                    }
+                }
+            }
+
+            const entry: { line: number; file?: string } = { line: i + 1 };
+            if (fileName) entry.file = fileName;
+            seen[funcName]!.push(entry);
+        }
+    }
+
+    // 2回以上定義されている関数のみを返す
+    const duplicates: { name: string; locations: { line: number; file?: string }[] }[] = [];
+    for (const name in seen) {
+        const locs = seen[name];
+        if (locs && locs.length > 1) {
+            duplicates.push({ name, locations: locs });
+        }
+    }
+    return duplicates;
+}
+
+// GAS のビルトインオブジェクト・関数一覧（これらは「未定義」として報告しない）
+const GAS_BUILTINS = new Set([
+    // グローバルサービス
+    "SpreadsheetApp", "DriveApp", "UrlFetchApp", "ContentService",
+    "PropertiesService", "ScriptApp", "CacheService", "LockService",
+    "HtmlService", "MailApp", "GmailApp", "CalendarApp", "Session",
+    "Utilities", "Logger", "Browser", "Drive", "FormApp",
+    // JavaScript グローバル
+    "console", "JSON", "Math", "Date", "Object", "Array", "String",
+    "Number", "Error", "RegExp", "Map", "Set", "Promise", "Buffer",
+    "parseInt", "parseFloat", "isNaN", "isFinite", "setTimeout",
+    "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI",
+    "undefined", "null", "true", "false", "NaN", "Infinity",
+    // よくある GAS パターン
+    "e", "err", "error",
+]);
+
+/**
+ * A1: デッドコード検出
+ * 定義されているがどこからも呼ばれていない関数を検出
+ * @param code - 結合済みの GAS ソースコード
+ * @param fileMap - ファイル名→行数のマップ
+ * @param entryPoints - エントリーポイント（トリガーや Web App の受口）
+ */
+export function detectDeadCode(
+    code: string,
+    fileMap?: { name: string; startLine: number; endLine: number }[],
+    entryPoints: string[] = [
+        "doGet", "doPost", "onOpen", "onEdit", "onInstall",
+        "onSelectionChange", "onFormSubmit"
+    ]
+): { name: string; line: number; file?: string | undefined }[] {
+    const lines = code.split("\n");
+
+    // 1. 全関数定義を収集
+    const definedFunctions: { name: string; line: number; file?: string | undefined }[] = [];
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        const match = line.match(/^\s*function\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/);
+        if (match && match[1]) {
+            let fileName: string | undefined;
+            if (fileMap) {
+                for (const fm of fileMap) {
+                    if (i + 1 >= fm.startLine && i + 1 <= fm.endLine) {
+                        fileName = fm.name;
+                        break;
+                    }
+                }
+            }
+            const entry: { name: string; line: number; file?: string | undefined } = { name: match[1], line: i + 1 };
+            if (fileName) entry.file = fileName;
+            definedFunctions.push(entry);
+        }
+    }
+
+    // 2. 全関数呼び出しを収集（関数名( のパターン）
+    const calledFunctions = new Set<string>();
+    for (const line of lines) {
+        if (!line) continue;
+        // 関数定義行は除外
+        if (/^\s*function\s+/.test(line)) continue;
+        // 関数呼び出しパターン: funcName( ただし function funcName( は除外
+        const callMatches = line.matchAll(/\b([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g);
+        for (const m of callMatches) {
+            if (m[1]) calledFunctions.add(m[1]);
+        }
+    }
+
+    // 3. エントリーポイントとして呼ばれなくても除外すべき関数
+    const entryPointSet = new Set(entryPoints);
+
+    // 4. 定義されているが呼ばれていない関数を検出
+    const deadCode: { name: string; line: number; file?: string | undefined }[] = [];
+    for (const func of definedFunctions) {
+        if (!calledFunctions.has(func.name) && !entryPointSet.has(func.name)) {
+            deadCode.push(func);
+        }
+    }
+
+    return deadCode;
+}
+
+/**
+ * A2: 未定義関数呼び出しの検出
+ * コード中で呼ばれているが定義されていない関数を検出
+ * @param code - 結合済みの GAS ソースコード
+ * @param fileMap - ファイル名→行数のマップ
+ */
+export function detectUndefinedCalls(
+    code: string,
+    fileMap?: { name: string; startLine: number; endLine: number }[]
+): { name: string; line: number; file?: string | undefined }[] {
+    const lines = code.split("\n");
+
+    // 1. 全関数定義を収集
+    const definedFunctions = new Set<string>();
+    for (const line of lines) {
+        if (!line) continue;
+        const match = line.match(/^\s*function\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/);
+        if (match && match[1]) {
+            definedFunctions.add(match[1]);
+        }
+    }
+
+    // 2. メソッド呼び出し（.func()）とプロパティアクセスを除外するパターン
+    const undefinedCalls: { name: string; line: number; file?: string | undefined }[] = [];
+    const seen = new Set<string>(); // 同じ関数名を何度も報告しない
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        // コメント行をスキップ
+        if (/^\s*\/\//.test(line) || /^\s*\/?\*/.test(line)) continue;
+
+        // 関数呼び出しを検出（メソッド呼び出し .func() を除外）
+        const callMatches = line.matchAll(/(?<!\.\s*)\b([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g);
+        for (const m of callMatches) {
+            const funcName = m[1];
+            if (!funcName) continue;
+            // 予約語・ビルトイン・定義済みは除外
+            if (definedFunctions.has(funcName)) continue;
+            if (GAS_BUILTINS.has(funcName)) continue;
+            // JavaScript キーワードを除外
+            if (["if", "for", "while", "switch", "catch", "return", "throw",
+                 "typeof", "instanceof", "new", "delete", "void", "var",
+                 "let", "const", "function", "class", "try"].includes(funcName)) continue;
+
+            if (seen.has(funcName)) continue;
+            seen.add(funcName);
+
+            let fileName: string | undefined;
+            if (fileMap) {
+                for (const fm of fileMap) {
+                    if (i + 1 >= fm.startLine && i + 1 <= fm.endLine) {
+                        fileName = fm.name;
+                        break;
+                    }
+                }
+            }
+
+            const entry: { name: string; line: number; file?: string | undefined } = { name: funcName, line: i + 1 };
+            if (fileName) entry.file = fileName;
+            undefinedCalls.push(entry);
+        }
+    }
+
+    return undefinedCalls;
+}
+
+/**
+ * A6: 飲み込まれたエラーの検出
+ * 空の catch ブロックや console.log だけの catch を警告
+ */
+export function detectSwallowedErrors(
+    code: string,
+    fileMap?: { name: string; startLine: number; endLine: number }[]
+): { line: number; file?: string | undefined; type: string }[] {
+    const lines = code.split("\n");
+    const results: { line: number; file?: string | undefined; type: string }[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+
+        // catch (...) { } パターン（同一行で閉じる空 catch）
+        if (/catch\s*\([^)]*\)\s*\{\s*\}/.test(line)) {
+            let fileName: string | undefined;
+            if (fileMap) {
+                for (const fm of fileMap) {
+                    if (i + 1 >= fm.startLine && i + 1 <= fm.endLine) {
+                        fileName = fm.name;
+                        break;
+                    }
+                }
+            }
+            const entry: { line: number; file?: string | undefined; type: string } = { line: i + 1, type: "empty_catch" };
+            if (fileName) entry.file = fileName;
+            results.push(entry);
+            continue;
+        }
+
+        // catch の次の行が } だけ（1行の空 catch）
+        if (/catch\s*\([^)]*\)\s*\{/.test(line)) {
+            const nextLine = lines[i + 1];
+            if (nextLine && /^\s*\}\s*$/.test(nextLine)) {
+                let fileName: string | undefined;
+                if (fileMap) {
+                    for (const fm of fileMap) {
+                        if (i + 1 >= fm.startLine && i + 1 <= fm.endLine) {
+                            fileName = fm.name;
+                            break;
+                        }
+                    }
+                }
+                const entry: { line: number; file?: string | undefined; type: string } = { line: i + 1, type: "empty_catch" };
+                if (fileName) entry.file = fileName;
+                results.push(entry);
+            }
+        }
+    }
+
+    return results;
+}
+
+/**
+ * C1: Logger モック
+ * GAS 固有の Logger.log() / Logger.getLog() をエミュレート
+ */
+export class LoggerEmulator {
+    private logs: string[] = [];
+
+    log(...args: any[]): void {
+        this.logs.push(args.map(a => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" "));
+    }
+
+    getLog(): string {
+        return this.logs.join("\n");
+    }
+
+    clear(): void {
+        this.logs = [];
+    }
+
+    getLogs(): string[] {
+        return [...this.logs];
+    }
+}
+
+/**
+ * D1: アサーション関数群
+ * テストスクリプト内で使用可能なアサーション
+ */
+export class TestAssertions {
+    private results: { pass: boolean; message: string }[] = [];
+
+    assertEqual(actual: any, expected: any, label?: string): void {
+        const pass = JSON.stringify(actual) === JSON.stringify(expected);
+        this.results.push({
+            pass,
+            message: pass
+                ? `✅ ${label || "assertEqual"}: OK`
+                : `❌ ${label || "assertEqual"}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`
+        });
+    }
+
+    assertTrue(value: any, label?: string): void {
+        const pass = !!value;
+        this.results.push({
+            pass,
+            message: pass
+                ? `✅ ${label || "assertTrue"}: OK`
+                : `❌ ${label || "assertTrue"}: expected truthy, got ${JSON.stringify(value)}`
+        });
+    }
+
+    assertFalse(value: any, label?: string): void {
+        const pass = !value;
+        this.results.push({
+            pass,
+            message: pass
+                ? `✅ ${label || "assertFalse"}: OK`
+                : `❌ ${label || "assertFalse"}: expected falsy, got ${JSON.stringify(value)}`
+        });
+    }
+
+    assertNotNull(value: any, label?: string): void {
+        const pass = value !== null && value !== undefined;
+        this.results.push({
+            pass,
+            message: pass
+                ? `✅ ${label || "assertNotNull"}: OK`
+                : `❌ ${label || "assertNotNull"}: got ${value}`
+        });
+    }
+
+    assertThrows(fn: () => void, label?: string): void {
+        let threw = false;
+        try { fn(); } catch (e) { threw = true; }
+        this.results.push({
+            pass: threw,
+            message: threw
+                ? `✅ ${label || "assertThrows"}: OK`
+                : `❌ ${label || "assertThrows"}: expected function to throw`
+        });
+    }
+
+    getResults(): { pass: boolean; message: string }[] {
+        return this.results;
+    }
+
+    getSummary(): { total: number; passed: number; failed: number; messages: string[] } {
+        const passed = this.results.filter(r => r.pass).length;
+        return {
+            total: this.results.length,
+            passed,
+            failed: this.results.length - passed,
+            messages: this.results.map(r => r.message)
+        };
+    }
+}
+

@@ -16,7 +16,14 @@ import {
     ContentServiceEmulator,
     PropertiesServiceEmulator,
     DriveAdvancedServiceEmulator,
-    Spreadsheet
+    ScriptAppEmulator,
+    Spreadsheet,
+    detectDuplicateFunctions,
+    detectDeadCode,
+    detectUndefinedCalls,
+    detectSwallowedErrors,
+    LoggerEmulator,
+    TestAssertions
 } from "./emulator.js";
 
 const execAsync = promisify(exec);
@@ -158,7 +165,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     properties: {
                         gasFilePath: {
                             type: "string",
-                            description: "Absolute path of the .gs or .js file to execute",
+                            description: "Absolute path of the .gs or .js file to execute, or a directory containing .gs files",
+                        },
+                        gasFilePaths: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "Array of absolute paths to .gs files to load (alternative to gasFilePath for multi-file projects)",
                         },
                         functionName: {
                             type: "string",
@@ -186,54 +198,164 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === "gas_emulate") {
         const gasFilePath = args?.gasFilePath as string;
+        const gasFilePaths = args?.gasFilePaths as string[] | undefined;
         const functionName = args?.functionName as string;
         const funcArgs = (args?.args as any[]) || [];
         const mockState = args?.mockState as any;
 
         try {
-            let gasCode = fs.readFileSync(gasFilePath, "utf8");
+            // ========================================
+            // Step 2: 複数ファイル結合ロード
+            // ========================================
+            let combinedCode = "";
+            const fileMap: { name: string; startLine: number; endLine: number }[] = [];
+            let currentLine = 1;
 
-            // --- GAS Non-destructive Test Logic ---
-            // 1. Remove Node-specific keywords that crash GAS
+            // ファイルリストの構築
+            let filesToLoad: string[] = [];
+
+            if (gasFilePaths && gasFilePaths.length > 0) {
+                // 明示的な複数ファイル指定
+                filesToLoad = gasFilePaths;
+            } else if (gasFilePath) {
+                const stat = fs.statSync(gasFilePath);
+                if (stat.isDirectory()) {
+                    // ディレクトリ指定: 全 .gs ファイルを収集
+                    const entries = fs.readdirSync(gasFilePath)
+                        .filter(f => f.endsWith(".gs") || f.endsWith(".js"))
+                        .sort(); // アルファベット順で安定したロード順
+                    filesToLoad = entries.map(f => path.join(gasFilePath, f));
+                } else {
+                    // 単一ファイル指定（後方互換）
+                    filesToLoad = [gasFilePath];
+                }
+            }
+
+            if (filesToLoad.length === 0) {
+                throw new Error("No .gs files found to load.");
+            }
+
+            // ファイル結合
+            for (const filePath of filesToLoad) {
+                const code = fs.readFileSync(filePath, "utf8");
+                const lineCount = code.split("\n").length;
+                const fileName = path.basename(filePath);
+
+                fileMap.push({
+                    name: fileName,
+                    startLine: currentLine,
+                    endLine: currentLine + lineCount - 1
+                });
+
+                combinedCode += `// ===== FILE: ${fileName} =====\n`;
+                combinedCode += code + "\n";
+                currentLine += lineCount + 1; // +1 for the file header comment
+            }
+
+            // ========================================
+            // Step 1: 重複関数の静的検出
+            // ========================================
+            const duplicates = detectDuplicateFunctions(combinedCode, fileMap);
+            const warnings: string[] = [];
+
+            if (duplicates.length > 0) {
+                for (const dup of duplicates) {
+                    const locations = dup.locations.map(l =>
+                        `  - Line ${l.line}${l.file ? ` (${l.file})` : ""}`
+                    ).join("\n");
+                    const lastDef = dup.locations[dup.locations.length - 1]!;
+                    warnings.push(
+                        `⚠️ DUPLICATE FUNCTION: '${dup.name}' is defined ${dup.locations.length} times:\n` +
+                        `${locations}\n` +
+                        `  → GAS will use the LAST definition (Line ${lastDef.line}${lastDef.file ? `, ${lastDef.file}` : ""})`
+                    );
+                }
+                console.error(`[STATIC_ANALYSIS] ${warnings.join("\n")}`);
+            }
+
+            // --- GAS Non-destructive Code Transform ---
+            let gasCode = combinedCode;
             gasCode = gasCode.replace(/module\.exports\s*=\s*(.*);?/g, "// $&");
             gasCode = gasCode.replace(/const\s+.*\s*=\s*require\(.*\);?/g, "// $&");
             gasCode = gasCode.replace(/^import\s+.*;?/gm, "// $&");
-
-            // 2. Convert const/let to var for VM compatibility in some cases
             gasCode = gasCode.replace(/^(const|let) /gm, "var ");
 
-            // Emulator instance creation
+            // エミュレータインスタンスの作成
             const ss = new Spreadsheet("EmulatedSS");
             if (mockState) {
                 ss.loadState(mockState);
             }
 
+            // B1: コンソール出力キャプチャ
+            const capturedLogs: { level: string; message: string }[] = [];
+
+            // C1: Logger モック
+            const logger = new LoggerEmulator();
+
+            // D1: アサーション関数
+            const assertions = new TestAssertions();
+
+            // B3: API 呼び出し回数トラッキング
+            const apiCalls: { [service: string]: number } = {};
+            const trackApi = (service: string) => {
+                apiCalls[service] = (apiCalls[service] || 0) + 1;
+            };
+
             const context = {
                 SpreadsheetApp: {
                     ...SpreadsheetAppEmulator,
-                    getActiveSpreadsheet: () => ss,
-                    openById: (id: string) => ss,
+                    getActiveSpreadsheet: () => { trackApi("SpreadsheetApp"); return ss; },
+                    openById: (id: string) => { trackApi("SpreadsheetApp.openById"); return ss; },
                 },
                 Utilities: UtilitiesEmulator,
                 DriveApp: DriveAppEmulator,
                 ContentService: ContentServiceEmulator,
                 PropertiesService: PropertiesServiceEmulator,
                 Drive: DriveAdvancedServiceEmulator,
+                ScriptApp: ScriptAppEmulator,
+                Logger: logger,
+                // D1: アサーション関数をグローバルに注入
+                assertEqual: assertions.assertEqual.bind(assertions),
+                assertTrue: assertions.assertTrue.bind(assertions),
+                assertFalse: assertions.assertFalse.bind(assertions),
+                assertNotNull: assertions.assertNotNull.bind(assertions),
+                assertThrows: assertions.assertThrows.bind(assertions),
                 UrlFetchApp: {
-                    fetch: (url: string) => ({
-                        getBlob: () => ({
-                            setName: (n: string) => ({
-                                name: n,
-                                getDataAsString: () => "Ticker\tCode\nTest\t1234\n"
-                            })
-                        }),
-                        getContentText: () => ""
-                    })
+                    fetch: (url: string, options?: any) => {
+                        trackApi("UrlFetchApp.fetch");
+                        return {
+                            getBlob: () => ({
+                                setName: (n: string) => ({
+                                    name: n,
+                                    getDataAsString: () => "Ticker\tCode\nTest\t1234\n"
+                                })
+                            }),
+                            getContentText: () => "",
+                            getResponseCode: () => 200
+                        };
+                    }
                 },
+                // B1: コンソール出力のキャプチャ
                 console: {
-                    log: (...m: any[]) => console.error(`[GAS_LOG] ${m.join(" ")}`),
-                    error: (...m: any[]) => console.error(`[GAS_ERR] ${m.join(" ")}`),
-                    warn: (...m: any[]) => console.error(`[GAS_WARN] ${m.join(" ")}`),
+                    log: (...m: any[]) => {
+                        const msg = m.map(x => typeof x === "object" ? JSON.stringify(x) : String(x)).join(" ");
+                        capturedLogs.push({ level: "log", message: msg });
+                        console.error(`[GAS_LOG] ${msg}`);
+                    },
+                    error: (...m: any[]) => {
+                        const msg = m.map(x => typeof x === "object" ? JSON.stringify(x) : String(x)).join(" ");
+                        capturedLogs.push({ level: "error", message: msg });
+                        console.error(`[GAS_ERR] ${msg}`);
+                    },
+                    warn: (...m: any[]) => {
+                        const msg = m.map(x => typeof x === "object" ? JSON.stringify(x) : String(x)).join(" ");
+                        capturedLogs.push({ level: "warn", message: msg });
+                        console.error(`[GAS_WARN] ${msg}`);
+                    },
+                    info: (...m: any[]) => {
+                        const msg = m.map(x => typeof x === "object" ? JSON.stringify(x) : String(x)).join(" ");
+                        capturedLogs.push({ level: "info", message: msg });
+                    },
                 },
                 Date,
                 Math,
@@ -243,7 +365,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 Number,
                 JSON,
                 Error,
-                Buffer
+                Buffer,
+                parseInt,
+                parseFloat,
+                isNaN,
+                isFinite,
+                RegExp,
+                Map,
+                Set,
+                Promise,
+                setTimeout: (fn: Function, ms: number) => fn(),
+                encodeURIComponent,
+                decodeURIComponent,
             };
 
             const vmContext = vm.createContext(context);
@@ -251,11 +384,73 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             const targetFunc = (vmContext as any)[functionName];
             if (typeof targetFunc !== "function") {
-                throw new Error(`Function '${functionName}' not found in ${gasFilePath}`);
+                const availableFuncs = Object.keys(vmContext as any)
+                    .filter(k => typeof (vmContext as any)[k] === "function")
+                    .join(", ");
+                throw new Error(
+                    `Function '${functionName}' not found.\n` +
+                    `Available functions: ${availableFuncs}`
+                );
             }
 
+            // B2: 実行時間計測
+            const startTime = Date.now();
             const result = targetFunc(...funcArgs);
+            const executionTimeMs = Date.now() - startTime;
             const finalState = ss.dumpState();
+
+            // ========================================
+            // A1: デッドコード検出
+            // ========================================
+            const deadCode = detectDeadCode(combinedCode, fileMap);
+            if (deadCode.length > 0) {
+                const deadList = deadCode.map(d =>
+                    `  - ${d.name} (Line ${d.line}${d.file ? `, ${d.file}` : ""})`
+                ).join("\n");
+                warnings.push(
+                    `🪦 DEAD CODE: ${deadCode.length} function(s) defined but never called:\n${deadList}`
+                );
+            }
+
+            // ========================================
+            // A2: 未定義関数呼び出し検出
+            // ========================================
+            const undefinedCalls = detectUndefinedCalls(combinedCode, fileMap);
+            if (undefinedCalls.length > 0) {
+                const undefList = undefinedCalls.map(u =>
+                    `  - ${u.name}() (Line ${u.line}${u.file ? `, ${u.file}` : ""})`
+                ).join("\n");
+                warnings.push(
+                    `❓ UNDEFINED CALLS: ${undefinedCalls.length} function(s) called but not defined:\n${undefList}`
+                );
+            }
+
+            // ========================================
+            // A6: 飲み込まれたエラーの検出
+            // ========================================
+            const swallowed = detectSwallowedErrors(combinedCode, fileMap);
+            if (swallowed.length > 0) {
+                const swallowedList = swallowed.map(s =>
+                    `  - Line ${s.line}${s.file ? ` (${s.file})` : ""}: ${s.type}`
+                ).join("\n");
+                warnings.push(
+                    `🤐 SWALLOWED ERRORS: ${swallowed.length} empty catch block(s):\n${swallowedList}`
+                );
+            }
+
+            // B2: 6分制限警告
+            const executionWarnings: string[] = [];
+            if (executionTimeMs > 300000) { // 5分超
+                executionWarnings.push(`⏰ CRITICAL: Execution took ${(executionTimeMs/1000).toFixed(1)}s — approaching GAS 6-minute limit!`);
+            } else if (executionTimeMs > 60000) { // 1分超
+                executionWarnings.push(`⏱️ WARNING: Execution took ${(executionTimeMs/1000).toFixed(1)}s — monitor for GAS timeout risk.`);
+            }
+            warnings.push(...executionWarnings);
+
+            // アサーション結果の収集
+            const testResults = assertions.getResults().length > 0
+                ? assertions.getSummary()
+                : undefined;
 
             return {
                 content: [
@@ -264,6 +459,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         text: JSON.stringify({
                             status: "success",
                             result: result,
+                            warnings: warnings.length > 0 ? warnings : undefined,
+                            filesLoaded: fileMap.map(f => f.name),
+                            logs: capturedLogs.length > 0 ? capturedLogs : undefined,
+                            loggerOutput: logger.getLogs().length > 0 ? logger.getLogs() : undefined,
+                            testResults: testResults,
+                            apiCalls: Object.keys(apiCalls).length > 0 ? apiCalls : undefined,
+                            executionTimeMs,
                             finalState: finalState
                         }, null, 2)
                     }
