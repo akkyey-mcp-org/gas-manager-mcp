@@ -11,3 +11,10 @@ out/
 
 # Logs
 *.log
+
+# Documentation centralization
+docs
+full-context
+*_full_context.md
+blog
+ideas
