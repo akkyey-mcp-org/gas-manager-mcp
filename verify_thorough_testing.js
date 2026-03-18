@@ -5,7 +5,9 @@ import {
     UtilitiesEmulator,
     DriveAppEmulator,
     ContentServiceEmulator,
-    DriveAdvancedServiceEmulator
+    DriveAdvancedServiceEmulator,
+    PropertiesServiceEmulator,
+    LoggerEmulator
 } from "./out/emulator.js";
 import vm from "vm";
 
@@ -24,10 +26,12 @@ async function runTestScenario(name, setupContext, testFn) {
     console.log(`\n=== Scenario: ${name} ===`);
     try {
         let gasCode = fs.readFileSync(gasFilePath, "utf8");
+        // GAS Non-destructive Code Transform (simplified version of what's in index.ts)
         gasCode = gasCode.replace(/^(const|let) /gm, "var ");
 
         const ss = new Spreadsheet("TestSS");
-        ss.insertSheet(CONFIG.SHEET_NAMES.MASTER_LIST);
+        const jpxSheet = ss.insertSheet(CONFIG.SHEET_NAMES.MASTER_LIST);
+        jpxSheet.getRange(1, 1, 1, 2).setValues([["コード", "銘柄名"]]); // Head start for normal flow
 
         const context = {
             SpreadsheetApp: {
@@ -40,15 +44,18 @@ async function runTestScenario(name, setupContext, testFn) {
             DriveApp: DriveAppEmulator,
             ContentService: ContentServiceEmulator,
             Drive: DriveAdvancedServiceEmulator,
+            PropertiesService: PropertiesServiceEmulator,
+            Logger: new LoggerEmulator(),
             UrlFetchApp: {
                 fetch: () => ({
                     getBlob: () => ({
                         setName: (n) => ({
                             name: n,
-                            getDataAsString: () => "Ticker\tCode\nTest\t1234\nTest2\t5678"
+                            getDataAsString: () => "コード\t名称\n1234\tTest\n5678\tTest2"
                         })
                     }),
-                    getContentText: () => ""
+                    getContentText: () => "",
+                    getResponseCode: () => 200
                 })
             },
             console: {
@@ -74,11 +81,17 @@ async function runTestScenario(name, setupContext, testFn) {
 async function main() {
     // 1. Normal Flow
     await runTestScenario("Normal Flow", (ss) => ({}), async (vmContext, ss) => {
-        vmContext.logic_dailyTask_MasterRun();
-        // Since we insert 'JPX_Master_List' at start, check for content
+        // use engine suffixed names as per recent changes in gas_engine.gs
+        if (vmContext.logic_dailyTask_MasterRun_engine) {
+            vmContext.logic_dailyTask_MasterRun_engine();
+        } else {
+            throw new Error("logic_dailyTask_MasterRun_engine not found");
+        }
+        
         const jpxSheet = ss.getSheetByName(CONFIG.SHEET_NAMES.MASTER_LIST);
-        // Note: JPX filtering expects /^\d{4}$/ on B column. 
-        // Our mock Fetch returns "1234" and "5678" as codes.
+        if (!jpxSheet || jpxSheet.getLastRow() <= 1) {
+            throw new Error("JPX_Master_List was not updated correctly");
+        }
     });
 
     // 2. Sticky Logic (0 guard)

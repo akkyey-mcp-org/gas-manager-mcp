@@ -138,6 +138,19 @@ export class Sheet {
         }
         return lastRow;
     }
+    getLastColumn(): number {
+        let lastCol = 0;
+        for (const row of this.data) {
+            if (row) {
+                for (let i = 0; i < row.length; i++) {
+                    if (row[i] !== "" && row[i] !== null && row[i] !== undefined) {
+                        lastCol = Math.max(lastCol, i + 1);
+                    }
+                }
+            }
+        }
+        return lastCol;
+    }
 
     appendRow(row: any[]): void {
         this.data.push(row);
@@ -145,6 +158,10 @@ export class Sheet {
 
     clear(): void {
         this.data = [];
+    }
+
+    clearContents(): void {
+        this.data = this.data.map(row => (row ? row.map(() => "") : []));
     }
 
     getName(): string {
@@ -518,21 +535,46 @@ export function detectUndefinedCalls(
         // コメント行をスキップ
         if (/^\s*\/\//.test(line) || /^\s*\/?\*/.test(line)) continue;
 
-        // 関数呼び出しを検出（メソッド呼び出し .func() を除外）
-        const callMatches = line.matchAll(/(?<!\.\s*)\b([a-zA-Z_$][a-zA-Z0-9_$]*)\s*\(/g);
-        for (const m of callMatches) {
-            const funcName = m[1];
-            if (!funcName) continue;
+        // 関数呼び出しを検出 (PropertiesService.getScriptProperties().setProperty(...) 等)
+        // 文字列や正規表現リテラルを簡易的に除外した状態での正規化
+        const normalizedLine = line.replace(/(['"`]).*?\1/g, '""');
+        
+        // 簡易的なトークナイズとスキャン
+        let pos = 0;
+        while (pos < normalizedLine.length) {
+            // Identifier or Chained Path
+            const match = normalizedLine.slice(pos).match(/\b([a-zA-Z_$][a-zA-Z0-9_$]*(?:\s*\([^)]*\)\s*|\.[a-zA-Z_$][a-zA-Z0-9_$]*)*)\s*\(/);
+            if (!match) break;
+
+            const fullMatch = match[1] || "";
+            const startIdx = normalizedLine.indexOf(fullMatch, pos);
+            const funcNameWithChain = fullMatch.replace(/\s+/g, "");
+            
+            // 引数部分の特定
+            let openParenIdx = startIdx + fullMatch.length;
+            while (normalizedLine[openParenIdx] === " ") openParenIdx++;
+            
+            let bracketLevel = 1;
+            let endParenIdx = openParenIdx + 1;
+            while (endParenIdx < normalizedLine.length && bracketLevel > 0) {
+                if (normalizedLine[endParenIdx] === "(") bracketLevel++;
+                else if (normalizedLine[endParenIdx] === ")") bracketLevel--;
+                endParenIdx++;
+            }
+            const fullCall = normalizedLine.slice(startIdx, endParenIdx);
+            const funcName = funcNameWithChain;
+            pos = endParenIdx;
+
+            const baseName = funcName.split(".")[0] || "";
+            // 前にドットがある場合は単独のメソッド呼び出しなのでスキップ (例: .map(...))
+            if (startIdx > 0 && normalizedLine[startIdx - 1] === ".") continue;
             // 予約語・ビルトイン・定義済みは除外
             if (definedFunctions.has(funcName)) continue;
             if (GAS_BUILTINS.has(funcName)) continue;
             // JavaScript キーワードを除外
             if (["if", "for", "while", "switch", "catch", "return", "throw",
                  "typeof", "instanceof", "new", "delete", "void", "var",
-                 "let", "const", "function", "class", "try"].includes(funcName)) continue;
-
-            if (seen.has(funcName)) continue;
-            seen.add(funcName);
+                 "let", "const", "function", "class", "try"].includes(baseName)) continue;
 
             let fileName: string | undefined;
             if (fileMap) {
@@ -543,6 +585,23 @@ export function detectUndefinedCalls(
                     }
                 }
             }
+
+            // 特殊なメソッドチェーン引数チェック (setProperty 等)
+            if (funcName.endsWith(".setProperty") || funcName.endsWith(".getProperty")) {
+                const args = fullCall.match(/\((.*)\)/)?.[1] || "";
+                const argCount = args.split(",").filter(a => a.trim()).length;
+                if (funcName.endsWith(".setProperty") && argCount < 2) {
+                    undefinedCalls.push({ name: `${funcName} (missing arguments)`, line: i + 1, file: fileName });
+                    continue;
+                }
+                if (funcName.endsWith(".getProperty") && argCount < 1) {
+                    undefinedCalls.push({ name: `${funcName} (missing arguments)`, line: i + 1, file: fileName });
+                    continue;
+                }
+            }
+
+            if (seen.has(funcName)) continue;
+            seen.add(funcName);
 
             const entry: { name: string; line: number; file?: string | undefined } = { name: funcName, line: i + 1 };
             if (fileName) entry.file = fileName;
