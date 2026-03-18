@@ -1,0 +1,66 @@
+#  (Agent Rich-Logging Protocol)
+
+## 1.  (Core Philosophy)
+AIは、自身の思考過程とユーザーの指示、そして実行結果を「資産」として管理しなければならない。情報の質を保つため、以下の基準を厳格に適用する。
+
+## 2.  (Logging Timing)
+セッションの終了を待たず、以下の主要な変化点（マイルストーン）で即座に記録を実行する。
+- ** (Plan Approval)**: 複雑なタスクの計画が承認された直後。
+- ** (Implementation)**: 主要なコード変更や機能実装、検証が完了した直後。
+- ** (Trouble Resolve)**: 予期せぬエラーや難題を解決し、知見が得られた直後。
+
+## 3.  (Quality & Format)
+単なる要約（Summary）ではなく、以下の「フルトランスクリプト」形式を維持する。
+- ** (User Requests)**: ユーザーの原文のニュアンスまで含めた指示。
+- ** (Agent Reasoning)**: なぜその手法を選んだかという思考プロセス。
+- ** (Evidence)**: 実行したコマンドと結果、生成したアーティファクト。
+
+## 4.  (Specific Execution)
+記録には以下のコマンド（または同等の仕組み）を使用し、IDに基づいた管理を行う。
+```bash
+/home/irom/dev/antigravity-log-manager/scripts/core/agent_logger.sh "<conversation-id>" "<topic>" "<content>"
+```
+
+## 5.  (Sync)
+- **Master Knowledge Base**: `/home/irom/dev/antigravity-log-manager`
+- **Link**: 各プロジェクトの `.gemini/` を通じてこの最新プロトコルを定常的に参照する。
+
+---
+*Merged: gemini-core + .antigravityrules*
+
+## 6. ツール実行強制制約 (Tool Enforcement Protocol)
+AIは、安全性が担保された `safe-shell` および各種専門 MCP サーバーの使用を回避してはならない。
+
+```yaml
+rules:
+  # シェル実行の強制制約
+  shell_policy:
+    mode: strict
+    primary_tool: "execute_safe"
+    prohibited_tools: ["run_command", "send_command_input"]
+    hang_prevention:
+      strategy: "Isolation-First"
+      multi_exec_tier: "tier2"
+      polars_config: "auto-injected"
+    path_validation:
+      enforcement: "Strict-Path-Check"
+      allowed_scope: "ALLOWED_PATHS"
+    bypass_condition:
+      log_file: ".agent/local_insights.md"
+      required_headers: ["## Compliance: Shell Evasion"]
+
+  # 専門ツール（MCP）の強制利用
+  mcp_enforcement:
+    git:
+      mandatory_mcp: "git-task-server"
+      forbidden_commands: ["git commit", "git push", "git clone"]
+    google_drive:
+      mandatory_mcp: "gdrive-server"
+    memory:
+      mandatory_mcp: "memory-server"
+
+  # セッション整合
+  lifecycle:
+    start_required: "/start"
+    end_required: "/wq"
+```

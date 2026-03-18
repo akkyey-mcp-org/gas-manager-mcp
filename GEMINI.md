@@ -1,169 +1,29 @@
-#  (Agent Behavior Protocol)
+# エージェント行動規範 (Agent Behavior Protocol)
 
-## 1.  (Principles & Agent Skills)
+## 1. 原則とエージェントスキル
+本プロジェクトでは、定型作業の品質保証のため「エージェントスキル」の使用を義務付ける。
+- **セッション開始**: 必ず `/start` ワークフローを実行し、環境と規約を同期せよ。
+- **スキル宣言**: 🤖 **【スキル発動】 `skill_name`** と明示せよ。
 
-** (Agent Skills)**
-****
+## 2. 開発プロセス
+「Design First」を徹底し、トライアンドエラーを排除せよ。
+- **設計とADR**: 最新の設計書と意思決定録を参照し、詳細は [development.md](file:///home/irom/dev/gemini-core/docs/protocols/development.md) に従え。
+- **ドキュメント集約**: `docs/`, `full-context/`, `blog/`, `ideas/` は `gemini-docs` へ集約すること。詳細は [documentation.md](file:///home/irom/dev/gemini-core/docs/protocols/documentation.md) を参照せよ。
 
-****
->  ** `skill_name`**
+## 3. 安全性と完了定義
+- **コマンド安全性**: `safe-shell-server` と `.antigravityrules` を厳守せよ。
+    - **パス検証**: 全てのコマンドにおいて、操作対象のパスは `ALLOWED_PATHS`（プロジェクトルート等）内に限定される。
+    - **Tier の使い分け**: 
+        - **Tier1 (Default)**: 標準的な検証、軽量な操作。
+        - **Tier2 (Isolation)**: 多重実行、高負荷処理、外部ライブラリ（Polars等）の実行。パニック（失敗）が許容される代わりに、メインプロセスのハングを物理的に回避する。
+- **DoD (Definition of Done)**: 報告前に必ず `/wq` ワークフローを完遂せよ。
+    - 変更の完全コミット (Clean Status) とリモート同期 (Push)。
+    - ログのバックアップ (`log_syncer`)。
 
-###  (Continuous Improvement)
-
-****
-
-
-###  (Mandatory Skills)
-
-
- `.agent/skills/<skill_name>/SKILL.md` 
-
-1.  ** (`feat_implementer`):**
-    *   **:** 
-    *   **:** (Plan)(History)
-
-2.  ** (`quality_guard`):**
-    *   **:** Lint
-    *   **:** `vitest` / `jest` (Coverage), `eslint`, `prettier`, `tsc`
-
-3.  ** (`trouble_reporter`):**
-    *   **:** 
-    *   **:** (`trouble/`)
-
-4.  ** (Approval Before Implementation):**
-    *   **:** Implementation Plan
-    *   **:** 
-    *   **:** Typo
-
-5.  ** (`context_syncer`):**
-    *   **:** 
-    *   **:** `full_context` `task.md` / `backlog.md` 
-
-6.  **Git (`git_committer`):**
-    *   **:** 
-    *   **:** 
-
-7.  ** (`quality_gatekeeper`):**
-    *   **:** 
-    *   **:** Radon(CC)(MI)
-
-### 1.1  (Prohibited Actions & Anti-Patterns)
-
-****
-
-1.  **Git (No Direct Git Commit):**
-    *   `run_command`  `git commit -m ...`  `git_committer` 
-2.  ** (No Skipping Diagnostics):**
-    *    `npm test`  `npm run build` 
-3.  **:**
-    *    `GEMINI.md` 
-
+## 4. ガバナンス
+- **司令塔**: ルール変更は `gemini-core` でのみ行い、`/sync-gemini` で全軍へ適用せよ。
+- **知識の定着**: 重要な教訓は `memory-server` に記録し、知見を資産化せよ。
 
 ---
-
-## 2.  (Communication & Language)
-
-1.  **:**
-    *   ****
-2.  **:**
-    *   HTML
-
----
-
-## 3.  (Environment & Tools)
-
-1.  **:**
-    *    `node_modules`  `npm`  `npx` 
-2.  **:**
-    *    `tsc` `npx tsc` 
-3.  **Salesforce CLI (npm isolation):**
-    *   `sf` / `sfdx`  ** (`npm install`)** 
-    *    `npx sf ...` 
-
-## 4.  (Definition of Done)
-
- (`notify_user`) ****
-
-1.  **Git (Clean Status):**
-    *   `git status` Modified / Untracked
-    *    (`stock-analyzer4/` ) 
-2.  ** (Remote Sync):**
-    *    `git push` 
-    *   Colab
-3.  ** (Final Verification):**
-    *    `npm test` 
-
-****
-
----
-
-## 5.  (Infinite Loop Prevention)
-
-
-**2******  **** 
-
----
-
-## 6.  (Documentation & Blog)
-
-1.  **:**
-    -    **`blog/`**  `mcp-servers/blog/`
-    -   `docs/` 
-
-2.  ** (Continuous Blog Idea Capture):**
-    *   ** `blog/ideas/YYYY-MM-DD_ideas.md` **
-    *   
-    *    (`notify_user`) 
-
----
-
-## 7.  (Memory Management)
-
-MCP (`memory-server`) 
-
-### 7.1 
-*   **:** 
-*   **:** `user_preference` (), `project_insight` (), `task_history` (), `code_pattern` () 
-*   **:** `importance` (1-5) 
-
-### 7.2  (Memory Operations)
-
-**A.  (Recall)**
- `search_memories` 
-*   : 
-
-**B.  (Storage)**
- `create_memory` 
-*   **:** 
-
-*   **:** FTS5
-*   ** (Failure Recording):**  `trouble_reporter` **** `tag: ["failure", "anti_pattern"]` 
-
-**C.  (Promotion)**
-*   **:**  `docs/`  (Git)
-*   **:**  `memory-server` 
-
-**D. **
-*   **:**  `export_memories` JSONGit (`docs/memory_backup.json` ) 
-*   **:**  `delete_memory`  `VACUUM` (SQLite) 
-
-
-
----
-
-## 8.  (Configuration & File Structure)
-
- **XDG Base Directory** 
-
-### 8.1  (`GEMINI.md`)
-*   **:** `.config/google-antigravity/GEMINI.md`
-*   **:**
-    *   Single Source of Truth
-    *   ****
-    *   
-        ```bash
-        ln -sf /path/to/.config/google-antigravity/GEMINI.md ./GEMINI.md
-        ```
-
-### 8.2 Google Drive  ()
-*    Google Drive (`~/Google Drive/Config/GEMINI.md`) `.config/google-antigravity/` OSMac/Windows
+> [!TIP]
+> 各セクションの詳細は `docs/protocols/` 内の個別ドキュメントを作業直前に参照すること。
